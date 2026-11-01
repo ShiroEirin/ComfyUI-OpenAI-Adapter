@@ -79,6 +79,27 @@ workflows/
 | `params_schema` | 手写的参数说明（对象）；与自动生成合并，手写条目优先 |
 | `prompt_hint` | 给 Agent 的用法提示 |
 
+### 导入已有工作流（推荐）
+
+不用手写 meta。在 ComfyUI 里把图搭好，`Workflow → Export (API)` 导出 JSON，然后：
+
+```bash
+curl -X POST http://127.0.0.1:8188/v1/_import \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-workflow","workflow":{ ...导出的 JSON... }}'
+```
+
+适配器会：
+
+1. 校验是不是 API 格式（顶层出现 `nodes`/`links` 直接拒绝，并提示去导出）
+2. 扫描图结构自动推导 `prompt_node` / `size_nodes` / `seed_nodes` / `sampler_node` / `layout_node`
+3. 用 `/object_info` 生成 `params_schema`
+4. 原子写入 `workflows/<name>.json` 与 `workflows/<name>.meta.json`
+
+响应里带 `routing`（推导落在哪些节点）与 `inferred`（哪些键是猜的），核对一眼就知道准不准。
+
+`name` 只能含字母、数字、点、下划线、短横线，首字符不能是符号。同名默认拒绝，要覆盖传 `"overwrite": true`。想改推导结果，再传 `"meta": {...}`，其中字段会覆盖自动值。
+
 ## 接口
 
 ### `GET /v1/models`

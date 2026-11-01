@@ -22,11 +22,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import re
 import time
 import uuid
 from pathlib import Path
 
 WORKFLOW_DIR = Path(__file__).with_name("workflows")
+
+# A model id becomes a file name, so it must not be able to escape WORKFLOW_DIR, hide as
+# a dotfile, or collide with the ``<name>.meta.json`` sidecar convention.
+WORKFLOW_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 # Size must only travel through `size`: a flattened `width`/`height` would bypass the
 # three-way synchronization below and leave the graph internally inconsistent.
@@ -560,6 +566,58 @@ def _describe(model_id: str, entry: dict, object_info: dict | None = None) -> di
     }
 
 
+def _write_json_atomic(path: Path, payload) -> None:
+    """Write through a sibling temp file so a crash never leaves a half-written workflow."""
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temp, path)
+
+
+def _normalize_api_workflow(raw) -> dict:
+    """Validate the shape ``/prompt`` accepts, and drop export-only metadata.
+
+    ComfyUI's editor format (``nodes`` / ``links``) is rejected with a pointed message:
+    the UI→API conversion lives in the frontend, so the caller has to run
+    Workflow → Export (API) before importing.
+    """
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("workflow 必须是非空对象")
+    if "nodes" in raw or "links" in raw:
+        raise ValueError(
+            "这是 UI 编辑器格式（顶层含 nodes/links）。请在 ComfyUI 里用 "
+            "Workflow → Export (API) 导出，再导入导出的 JSON。")
+    workflow: dict = {}
+    for node_id, node in raw.items():
+        if node_id == "_meta":
+            continue
+        if not isinstance(node, dict) or not node.get("class_type"):
+            raise ValueError(f"节点 {node_id} 不是 API 格式：缺少 class_type")
+        workflow[str(node_id)] = node
+    if not workflow:
+        raise ValueError("workflow 里没有任何节点")
+    return workflow
+
+
+def _compose_import_meta(name: str, workflow: dict, inferred: dict,
+                         object_info: dict) -> dict:
+    """Build the sidecar for an imported graph out of what the graph itself says."""
+    meta: dict = {"display_name": name, "timeout_seconds": 560}
+    meta.update({key: value for key, value in inferred.items() if value})
+    layout_node = _resolve_layout_node(workflow, meta)
+    if layout_node:
+        meta["layout_node"] = layout_node
+    # A literal canvas on the size node is the only trustworthy default: anything else
+    # would advertise a size this graph never actually uses.
+    size_nodes = meta.get("size_nodes") or []
+    if size_nodes:
+        inputs = (workflow.get(str(size_nodes[0])) or {}).get("inputs") or {}
+        width, height = inputs.get("width"), inputs.get("height")
+        if isinstance(width, int) and isinstance(height, int):
+            meta["default_size"] = f"{width}x{height}"
+    meta["params_schema"] = _build_param_schema(workflow, meta, object_info)
+    return meta
+
+
 def _error(status: int, message: str, code: str = "invalid_request_error") -> tuple[int, dict]:
     return status, {"error": {"message": message, "type": code, "code": code}}
 
@@ -673,6 +731,59 @@ def register_routes() -> bool:
     @routes.get("/v1/_debug/last")
     async def last_generation(request):
         return web.json_response(LAST_REQUEST)
+
+    @routes.post("/v1/_import")
+    async def import_workflow(request):
+        """Adopt one exported graph as a model, inferring its sidecar on the way in."""
+        try:
+            body = await request.json()
+        except Exception:
+            status, payload = _error(400, "请求不是 JSON")
+            return web.json_response(payload, status=status)
+
+        name = str(body.get("name") or "").strip()
+        if not WORKFLOW_NAME_RE.fullmatch(name):
+            status, payload = _error(
+                400, "name 只能用字母、数字、点、下划线、短横线，首字符不能是符号，最多 64 个字符")
+            return web.json_response(payload, status=status)
+
+        try:
+            workflow = _normalize_api_workflow(body.get("workflow"))
+        except ValueError as error:
+            status, payload = _error(400, str(error))
+            return web.json_response(payload, status=status)
+
+        path = WORKFLOW_DIR / f"{name}.json"
+        if path.exists() and not body.get("overwrite"):
+            status, payload = _error(409, f"{name} 已存在；要覆盖请传 overwrite=true")
+            return web.json_response(payload, status=status)
+
+        object_info = await _load_object_info({name: {"workflow": workflow, "meta": {}}})
+        inferred = _infer_meta(workflow)
+        meta = _compose_import_meta(name, workflow, inferred, object_info)
+        overrides = body.get("meta")
+        if isinstance(overrides, dict):
+            # Caller-supplied fields win, including a hand-written schema.
+            meta.update({key: value for key, value in overrides.items()
+                         if value is not None})
+
+        WORKFLOW_DIR.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(path, workflow)
+        _write_json_atomic(WORKFLOW_DIR / f"{name}.meta.json", meta)
+
+        return web.json_response({
+            "ok": True,
+            "id": name,
+            "path": str(path),
+            "routing": {key: meta.get(key) for key in (
+                "prompt_node", "prompt_field", "size_nodes", "seed_nodes",
+                "sampler_node", "layout_node", "negative_node") if meta.get(key)},
+            "inferred": sorted(key for key in inferred
+                               if key not in (overrides or {})),
+            "default_size": meta.get("default_size") or "",
+            "params_schema": meta.get("params_schema") or {},
+            "node_inputs": _node_inputs(workflow, object_info),
+        })
 
     @routes.post("/v1/images/generations")
     async def generate(request):
