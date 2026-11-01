@@ -34,6 +34,14 @@ WORKFLOW_DIR = Path(__file__).with_name("workflows")
 # a dotfile, or collide with the ``<name>.meta.json`` sidecar convention.
 WORKFLOW_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
+# Windows refuses these as file names regardless of extension; worse, a file created
+# through an API quirk is then unopenable and often undeletable from Explorer.
+RESERVED_NAMES = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+
 # Size must only travel through `size`: a flattened `width`/`height` would bypass the
 # three-way synchronization below and leave the graph internally inconsistent.
 SIZE_KEYS = ("width", "height")
@@ -568,7 +576,7 @@ def _describe(model_id: str, entry: dict, object_info: dict | None = None) -> di
 
 def _write_json_atomic(path: Path, payload) -> None:
     """Write through a sibling temp file so a crash never leaves a half-written workflow."""
-    temp = path.with_name(path.name + ".tmp")
+    temp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temp, path)
 
@@ -592,6 +600,12 @@ def _normalize_api_workflow(raw) -> dict:
             continue
         if not isinstance(node, dict) or not node.get("class_type"):
             raise ValueError(f"节点 {node_id} 不是 API 格式：缺少 class_type")
+        inputs = node.get("inputs")
+        if inputs is None:
+            # A node without inputs is legal (a Note, a primitive); ComfyUI wants the key.
+            node["inputs"] = {}
+        elif not isinstance(inputs, dict):
+            raise ValueError(f"节点 {node_id} 的 inputs 不是对象")
         workflow[str(node_id)] = node
     if not workflow:
         raise ValueError("workflow 里没有任何节点")
@@ -614,6 +628,9 @@ def _compose_import_meta(name: str, workflow: dict, inferred: dict,
         width, height = inputs.get("width"), inputs.get("height")
         if isinstance(width, int) and isinstance(height, int):
             meta["default_size"] = f"{width}x{height}"
+    # A single known canvas is still a useful capability statement for a client.
+    if meta.get("default_size") and not meta.get("supported_resolutions"):
+        meta["supported_resolutions"] = meta["default_size"]
     meta["params_schema"] = _build_param_schema(workflow, meta, object_info)
     return meta
 
@@ -746,6 +763,9 @@ def register_routes() -> bool:
             status, payload = _error(
                 400, "name 只能用字母、数字、点、下划线、短横线，首字符不能是符号，最多 64 个字符")
             return web.json_response(payload, status=status)
+        if name.split(".")[0].lower() in RESERVED_NAMES:
+            status, payload = _error(400, f"name 不能是 Windows 保留设备名：{name}")
+            return web.json_response(payload, status=status)
 
         try:
             workflow = _normalize_api_workflow(body.get("workflow"))
@@ -754,7 +774,7 @@ def register_routes() -> bool:
             return web.json_response(payload, status=status)
 
         path = WORKFLOW_DIR / f"{name}.json"
-        if path.exists() and not body.get("overwrite"):
+        if path.exists() and body.get("overwrite") is not True:
             status, payload = _error(409, f"{name} 已存在；要覆盖请传 overwrite=true")
             return web.json_response(payload, status=status)
 
@@ -762,7 +782,14 @@ def register_routes() -> bool:
         inferred = _infer_meta(workflow)
         meta = _compose_import_meta(name, workflow, inferred, object_info)
         overrides = body.get("meta")
+        if overrides is not None and not isinstance(overrides, dict):
+            status, payload = _error(400, "meta 必须是对象")
+            return web.json_response(payload, status=status)
         if isinstance(overrides, dict):
+            schema = overrides.get("params_schema")
+            if schema is not None and not isinstance(schema, dict):
+                status, payload = _error(400, "meta.params_schema 必须是对象")
+                return web.json_response(payload, status=status)
             # Caller-supplied fields win, including a hand-written schema.
             meta.update({key: value for key, value in overrides.items()
                          if value is not None})
