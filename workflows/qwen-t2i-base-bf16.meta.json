@@ -1,0 +1,38 @@
+{
+  "display_name": "Qwen-Image 2.1 base bf16（原生 25 步）",
+  "prompt_node": "5",
+  "prompt_field": "text",
+  "size_nodes": [
+    "6"
+  ],
+  "seed_nodes": [
+    "8"
+  ],
+  "default_size": "1328x1328",
+  "supported_ratios": "1:1, 16:9, 9:16",
+  "supported_resolutions": "1328x1328, 1664x928, 928x1664",
+  "timeout_seconds": 560,
+  "prompt_hint": "原生 base 权重，未加加速。25 步 / CFG 1 / euler / simple。CFG=1 时负向词不生效，细节不够时把 steps 提到 30~40。",
+  "params_schema": {
+    "8.steps": {
+      "type": "integer",
+      "description": "采样步数，默认 25；细节不足时 30~40"
+    },
+    "8.cfg": {
+      "type": "number",
+      "description": "CFG，默认 1.0；CFG=1 时负向词无效"
+    },
+    "8.sampler_name": {
+      "type": "string",
+      "description": "采样器，默认 euler"
+    },
+    "8.scheduler": {
+      "type": "string",
+      "description": "调度器，默认 simple"
+    },
+    "8.denoise": {
+      "type": "number",
+      "description": "去噪强度，默认 1.0"
+    }
+  }
+}

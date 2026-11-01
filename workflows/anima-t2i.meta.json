@@ -1,0 +1,38 @@
+{
+  "display_name": "Anima 文生图（双 LoRA）",
+  "prompt_node": "11",
+  "prompt_field": "text",
+  "size_nodes": [
+    "28"
+  ],
+  "seed_nodes": [
+    "19"
+  ],
+  "default_size": "1024x1536",
+  "supported_ratios": "1:1, 16:9, 9:16, 2:3, 3:2",
+  "supported_resolutions": "1024x1536, 1024x1024, 1536x1024, 1344x768, 768x1344",
+  "timeout_seconds": 560,
+  "prompt_hint": "Danbooru tag 串：质量前缀开场（masterpiece, very aesthetic, best quality, score_9, score_8），角色一律「角色名 + 作品名」成对。负向词固定在模板里。",
+  "params_schema": {
+    "19.steps": {
+      "type": "integer",
+      "description": "采样步数"
+    },
+    "19.cfg": {
+      "type": "number",
+      "description": "CFG"
+    },
+    "19.sampler_name": {
+      "type": "string",
+      "description": "采样器"
+    },
+    "19.scheduler": {
+      "type": "string",
+      "description": "调度器"
+    },
+    "19.denoise": {
+      "type": "number",
+      "description": "去噪强度，默认 1.0"
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "display_name": "MOSS-Image-SFT 融合版（base+sft Balanced · 50步）",
+  "layout_node": "20",
+  "prompt_field": "prompt",
+  "size_nodes": ["6"],
+  "seed_nodes": ["7"],
+  "default_size": "1536x1024",
+  "supported_ratios": "1:1, 3:2, 2:3, 16:9, 9:16",
+  "supported_resolutions": "1536x1024, 1024x1024, 1024x1536, 1344x768, 768x1344",
+  "timeout_seconds": 560,
+  "prompt_hint": "base_fp16 + sft_fp16 按 Balanced 融合，文字与角色还原都更强（2026-10-30 实测：竖排七言 4 列加落款逐字正确）。prompt 写画面描述，构图由 params.layout 决定。",
+  "params_schema": {
+    "layout": {
+      "type": "object",
+      "description": "完整布局 draft（width/height/items[]），为该图提供版式（本模板默认不带布局，不传就是纯文生图）。坐标两种写法：① 像素 box:[x0,y0,x1,y1]（左上原点，留 4% 边距）；② 比例 bbox_coord_space:\"norm_1000\" + bbox_format:\"yxyx\" + 0-1000 的 bbox（跨尺寸复用，换 size 不用重算坐标）。宫格用比例稿等分即可：2x2 每格 500；3x2 列宽 333、行高 500；2x3 列宽 500、行高 333，末列/末行必须收到 1000。3-6 个框最有效，4x4(16 格) 会被模型忽略大部分。跨格主体写完整范围并加 span:true，不要拆成两个框。"
+    },
+    "strict": {
+      "type": "boolean",
+      "description": "true = 布局不合法时直接报错，不降级成普通文生图。"
+    },
+    "character_boxes": {
+      "type": "string",
+      "description": "角色框的 1 基序号，逗号分隔（例如 2 或 1,3）。"
+    },
+    "on_overflow": {
+      "type": "string",
+      "enum": ["clamp", "error", "expand"],
+      "description": "方框越出画布时的处理方式，默认 clamp。"
+    },
+    "7.steps": {
+      "type": "integer",
+      "description": "采样步数，默认 50。"
+    },
+    "7.cfg": {
+      "type": "number",
+      "description": "CFG，默认 3.0。"
+    },
+    "7.seed": {
+      "type": "integer",
+      "description": "随机种子；也可用顶层 seed。"
+    },
+    "21.strength": {
+      "type": "number",
+      "description": "base/sft 融合强度，默认 1.0；调低更接近 base 画风。"
+    },
+    "21.preset": {
+      "type": "string",
+      "description": "融合预设，默认 Balanced。"
+    }
+  }
+}

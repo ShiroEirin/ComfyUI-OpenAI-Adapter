@@ -1,0 +1,3 @@
+# Files kept in git but left out of the registry archive.
+__pycache__/
+*.py[cod]

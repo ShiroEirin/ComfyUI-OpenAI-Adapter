@@ -1,0 +1,23 @@
+[project]
+name = "comfyui-openai-adapter"
+description = "Serve ComfyUI workflows through the OpenAI Images API — no bridge process, no extra port."
+version = "0.1.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["comfyui", "openai", "images-api", "workflow", "local", "adapter"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/ShiroEirin/ComfyUI-OpenAI-Adapter"
+
+[tool.comfy]
+# TODO: create a publisher at https://registry.comfy.org and paste the id that
+# appears after "@" on your profile page. Publishing refuses to run while this is empty.
+PublisherId = ""
+DisplayName = "ComfyUI OpenAI Adapter"
+Icon = ""
