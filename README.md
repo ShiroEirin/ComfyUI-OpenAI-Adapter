@@ -77,6 +77,8 @@ workflows/
 | `supported_ratios` / `supported_resolutions` | 给客户端做能力声明的字符串 |
 | `timeout_seconds` | 单次执行超时，默认 600 |
 | `params_schema` | 手写的参数说明（对象）；与自动生成合并，手写条目优先 |
+| `aliases` | 自定义别名表 `{ "steps": "8.steps" }`，覆盖自动派生的同名项 |
+| `negative_field` | 负向词写入的字段名，默认 `text` |
 | `prompt_hint` | 给 Agent 的用法提示 |
 
 ### 导入已有工作流（推荐）
@@ -136,8 +138,20 @@ curl -X POST http://127.0.0.1:8188/v1/_import \
 
 - 普通键（如 `strict`、`character_boxes`）→ 写到 `layout_node` 的 `inputs`
 - `"<节点id>.<字段>"`（如 `"8.cfg"`）→ 写到该节点的该字段；**只要节点类定义了这个输入就接受**，哪怕当前模板没写它
-- `layout` → 覆盖布局文档，并同步 `size` 到布局文档、布局节点、`size_nodes` 三处
+- `layout` → 覆盖布局文档，并同步 `size` 到布局文档、布局节点、`size_nodes` 三处；图里没有布局节点时进 `ignored_params`
+- **别名**（`steps` / `cfg` / `sampler` / `scheduler` / `denoise` / `negative`）→ 由 `routing` 自动派生，等价于对应点号键；显式点号键优先
 - 落到不存在、且节点类也没定义的字段时**不会静默丢弃**，会出现在响应的 `ignored_params` 里
+
+### 负向提示词、种子与别名
+
+| 字段 | 语义 |
+|---|---|
+| `negative_prompt` | 写到推断出的 `negative_node`；只有单个文本编码器的图会返回 `ignored_params` |
+| `seed: -1` | 运行时随机（32 位无符号），实际值在响应 `seed` 字段回显，便于复现 |
+| `seed` 越界 | 裁到 `0..4294967295`；负数（除 `-1`）裁到 `0` |
+| `params: { "steps": 4 }` | 用别名，不必知道采样器是节点 8 |
+
+`GET /v1/models` 的 `aliases` 字段列出当前模型的别名表，`params_schema` 里也镜像了同名条目（描述写 `alias → 8.steps`）。
 
 ### `GET /v1/_debug/last`
 

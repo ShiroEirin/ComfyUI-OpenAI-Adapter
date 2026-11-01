@@ -24,6 +24,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from pathlib import Path
@@ -60,9 +61,9 @@ LAYOUT_OPTIONAL_INPUTS = {"character_boxes", "on_overflow", "strict"}
 # Images API defines must be listed here or a normal ``quality``/``stream`` flag would
 # be mistaken for a workflow parameter.
 RESERVED_BODY = {
-    "model", "prompt", "n", "response_format", "images", "seed", "size", "params",
-    "quality", "output_format", "output_compression", "background", "moderation",
-    "stream", "partial_images", "aspect_ratio", "resolution", "user",
+    "model", "prompt", "negative_prompt", "n", "response_format", "images", "seed",
+    "size", "params", "quality", "output_format", "output_compression", "background",
+    "moderation", "stream", "partial_images", "aspect_ratio", "resolution", "user",
 }
 
 # The graph is scanned instead of described, so a brand-new workflow lands in
@@ -485,8 +486,65 @@ def _apply_size(workflow: dict, meta: dict, layout_node: str | None,
     return touched
 
 
+# Fields worth a friendly name: an agent should be able to say `steps` without first
+# reading `routing` to learn that the sampler happened to be node 8.
+ALIAS_FIELDS = (
+    ("steps", "steps"),
+    ("cfg", "cfg"),
+    ("sampler_name", "sampler"),
+    ("scheduler", "scheduler"),
+    ("denoise", "denoise"),
+)
+
+
+def _resolve_seed(raw) -> int | None:
+    """Map caller seed semantics onto a value a sampler will accept.
+
+    ``-1`` means "pick one" — the OpenAI shape has no other way to ask for a random
+    seed. Everything is clamped to the unsigned 32-bit range, because KSampler rejects
+    negatives and oversized values, and it would only say so after the whole graph had
+    already been queued.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value == -1:
+        return secrets.randbits(32)
+    return max(0, min(value, 0xFFFFFFFF))
+
+
+def _derive_aliases(workflow: dict, meta: dict) -> dict[str, str]:
+    """Friendly parameter names for whatever the routing already resolved.
+
+    Explicit ``meta.aliases`` win, so a template can rename or shadow any of them.
+    """
+    aliases: dict[str, str] = {}
+    explicit = meta.get("aliases")
+    if isinstance(explicit, dict):
+        for key, value in explicit.items():
+            if value:
+                aliases[str(key)] = str(value)
+    sampler = meta.get("sampler_node")
+    if sampler:
+        inputs = (workflow.get(str(sampler)) or {}).get("inputs") or {}
+        for field, alias in ALIAS_FIELDS:
+            if field in inputs:
+                aliases.setdefault(alias, f"{sampler}.{field}")
+    negative = meta.get("negative_node")
+    if negative and negative in workflow:
+        field = meta.get("negative_field") or "text"
+        inputs = (workflow.get(str(negative)) or {}).get("inputs") or {}
+        if field in inputs:
+            aliases.setdefault("negative", f"{negative}.{field}")
+    return aliases
+
+
 def _apply_extra_params(workflow: dict, layout_node: str | None,
-                        params: dict, object_info: dict | None = None
+                        params: dict, object_info: dict | None = None,
+                        aliases: dict | None = None
                         ) -> tuple[list[str], list[str]]:
     """Merge caller-supplied workflow parameters.
 
@@ -494,6 +552,9 @@ def _apply_extra_params(workflow: dict, layout_node: str | None,
 
     * ``"strict": true``          -> an input on the layout node
     * ``"7.steps": 30``           -> ``<node id>.<input>`` anywhere in the graph
+
+    Friendly names from ``aliases`` are expanded first (``steps`` -> ``8.steps``); an
+    explicit dotted key always wins over an alias.
 
     A field the node *class* declares is written even when this template leaves it out —
     ComfyUI then uses the caller's value over the node default, which is what makes an
@@ -503,6 +564,11 @@ def _apply_extra_params(workflow: dict, layout_node: str | None,
     applied: list[str] = []
     ignored: list[str] = []
     info = object_info or {}
+    if aliases:
+        expanded: dict = {}
+        for key, value in params.items():
+            expanded[aliases.get(key, key)] = value
+        params = expanded
     for key, value in params.items():
         if not isinstance(key, str) or not key:
             continue
@@ -552,13 +618,25 @@ def _describe(model_id: str, entry: dict, object_info: dict | None = None) -> di
     layout_node = _resolve_layout_node(workflow, merged)
     if layout_node:
         merged.setdefault("layout_node", layout_node)
+    aliases = _derive_aliases(workflow, merged)
+    schema = _build_param_schema(workflow, merged, info)
+    for alias, target in aliases.items():
+        if alias in schema:
+            continue
+        # The target may be a field deliberately kept out of the schema (a text encoder's
+        # `text`, for instance); the alias still has to be visible to the caller.
+        spec = schema.get(target) or {"type": "string"}
+        # Mirrored into the schema so the friendly name shows up in the tool description
+        # the agent actually reads; the dotted key stays authoritative.
+        schema[alias] = dict(spec, description=f"alias → {target}")
     return {
         "id": model_id,
         "object": "model",
         "created": int(time.time()),
         "owned_by": "comfyui",
         "display_name": merged.get("display_name") or model_id,
-        "params_schema": _build_param_schema(workflow, merged, info),
+        "params_schema": schema,
+        "aliases": aliases,
         "node_inputs": _node_inputs(workflow, info),
         "inferred": sorted(key for key in inferred if key not in meta),
         # Which nodes the routing actually landed on: proving an inference from the model
@@ -808,6 +886,7 @@ def register_routes() -> bool:
             "inferred": sorted(key for key in inferred
                                if key not in (overrides or {})),
             "default_size": meta.get("default_size") or "",
+            "aliases": _derive_aliases(workflow, meta),
             "params_schema": meta.get("params_schema") or {},
             "node_inputs": _node_inputs(workflow, object_info),
         })
@@ -915,20 +994,47 @@ def register_routes() -> bool:
             workflow[layout_node].setdefault("inputs", {})["layout"] = json.dumps(
                 layout, ensure_ascii=False)
             touched.append(f"{layout_node}.layout")
+        elif layout_override is not None:
+            # The graph has no layout board, so the document cannot land anywhere.
+            # Say so: a caller that thinks it set a layout must not get a silent no-op.
+            ignored.append("layout")
 
         size = _parse_size(body.get("size")) or _parse_size(meta.get("default_size"))
         if size:
             touched.extend(_apply_size(workflow, meta, layout_node, size[0], size[1]))
 
-        seed = body.get("seed")
-        if isinstance(seed, int):
+        negative = body.get("negative_prompt")
+        if negative is None:
+            # A direct API caller may nest it beside the other workflow parameters.
+            negative = params.pop("negative_prompt", None)
+        if isinstance(negative, str) and negative.strip():
+            negative_node = meta.get("negative_node")
+            if negative_node and negative_node in workflow:
+                field = meta.get("negative_field") or "text"
+                workflow[negative_node].setdefault("inputs", {})[field] = negative
+                touched.append(f"{negative_node}.{field}")
+            else:
+                # Reported rather than dropped: a graph with a single text encoder simply
+                # cannot take a negative prompt, and the caller needs to know that.
+                ignored.append("negative_prompt")
+
+        seed = _resolve_seed(body.get("seed"))
+        if seed is not None:
             for node_id in meta.get("seed_nodes") or []:
                 node = workflow.get(str(node_id))
-                if isinstance(node, dict):
-                    node.setdefault("inputs", {})["seed"] = seed
-                    touched.append(f"{node_id}.seed")
+                if not isinstance(node, dict):
+                    continue
+                inputs = node.setdefault("inputs", {})
+                # KSampler names it `seed`; KSamplerAdvanced / SamplerCustom use
+                # `noise_seed`. Writing the other one is silently ignored by ComfyUI.
+                field = ("seed" if "seed" in inputs or "noise_seed" not in inputs
+                         else "noise_seed")
+                inputs[field] = seed
+                touched.append(f"{node_id}.{field}")
 
-        applied, rejected = _apply_extra_params(workflow, layout_node, params, object_info)
+        aliases = _derive_aliases(workflow, meta)
+        applied, rejected = _apply_extra_params(
+            workflow, layout_node, params, object_info, aliases)
         touched.extend(applied)
         ignored.extend(rejected)
 
@@ -943,6 +1049,7 @@ def register_routes() -> bool:
             "created": int(time.time()),
             "model": model_id,
             "prompt_id": result["prompt_id"],
+            "seed": seed,
             "applied": touched,
             "ignored_params": ignored,
             "data": [{"b64_json": base64.b64encode(image).decode("ascii")}
