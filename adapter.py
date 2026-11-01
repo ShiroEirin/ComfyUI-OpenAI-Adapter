@@ -331,7 +331,7 @@ def _build_param_schema(workflow: dict, meta: dict, object_info: dict) -> dict:
     for key in ("sampler_node", "layout_node"):
         if meta.get(key):
             targets.append(str(meta[key]))
-    for key in ("size_nodes", "seed_nodes"):
+    for key in ("size_nodes", "seed_nodes", "extra_param_nodes"):
         targets.extend(str(node_id) for node_id in (meta.get(key) or []))
     for node_id in dict.fromkeys(targets):
         node = workflow.get(node_id)
@@ -496,6 +496,20 @@ ALIAS_FIELDS = (
     ("denoise", "denoise"),
 )
 
+# Nodes that run after the sampler. They take no caller parameters, but the caller has to
+# know they exist: an upscale makes the delivered pixels differ from `size`, and a local
+# redraw overwrites the boxes a layout just placed.
+POST_PROCESS_HINTS = {
+    "RTXVideoSuperResolution": ("upscale", True),
+    "ImageUpscaleWithModel": ("upscale", True),
+    "ImageScaleBy": ("upscale", True),
+    "ImageScale": ("resize", True),
+    "UpscaleModelLoader": ("upscale-model", False),
+    "FaceDetailer": ("redraw", False),
+    "DetailerForEach": ("redraw", False),
+    "UltralyticsDetectorProvider": ("detector", False),
+}
+
 
 def _resolve_seed(raw) -> int | None:
     """Map caller seed semantics onto a value a sampler will accept.
@@ -603,6 +617,84 @@ def _apply_extra_params(workflow: dict, layout_node: str | None,
     return applied, ignored
 
 
+def _post_process_nodes(workflow: dict) -> list[dict]:
+    """Describe the nodes that run after sampling and can surprise the caller."""
+    found = []
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("class_type") or "")
+        hint = POST_PROCESS_HINTS.get(class_type)
+        if not hint:
+            continue
+        effect, affects_canvas = hint
+        found.append({
+            "id": str(node_id),
+            "class": class_type,
+            "effect": effect,
+            "affects_canvas": affects_canvas,
+        })
+    return sorted(found, key=lambda item: (0, int(item["id"]))
+                  if item["id"].isdigit() else (1, 0))
+
+
+def _layout_wired(workflow: dict, layout_node: str | None, meta: dict) -> bool:
+    """True when the layout board's output actually reaches the sampler's positive.
+
+    A board can sit in the graph while nothing consumes it. The layout then compiles and
+    is thrown away, and the delivered picture looks like plain text-to-image.
+    """
+    if not layout_node or layout_node not in workflow:
+        return False
+    sampler = meta.get("sampler_node")
+    if sampler and sampler in workflow:
+        queue = [_link((workflow[sampler].get("inputs") or {}).get("positive"))]
+    else:
+        # No sampler to judge against: accept any consumer of the board.
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            for value in (node.get("inputs") or {}).values():
+                if _link(value) == layout_node:
+                    return True
+        return False
+    seen: set[str] = set()
+    while queue and len(seen) < 80:
+        node_id = queue.pop(0)
+        if not node_id or node_id in seen or node_id not in workflow:
+            continue
+        seen.add(node_id)
+        if node_id == layout_node:
+            return True
+        node = workflow[node_id]
+        if not isinstance(node, dict):
+            continue
+        for value in (node.get("inputs") or {}).values():
+            upstream = _link(value)
+            if upstream and upstream not in seen:
+                queue.append(upstream)
+    return False
+
+
+def _warnings(workflow: dict, meta: dict) -> list[str]:
+    """Things a caller would otherwise only discover by looking at the picture."""
+    notes: list[str] = []
+    layout_node = meta.get("layout_node")
+    if layout_node and layout_node in workflow and not _layout_wired(
+            workflow, layout_node, meta):
+        sampler = meta.get("sampler_node") or "?"
+        notes.append(
+            f"节点 {layout_node} 是 LayoutBoard，但它的输出没有到达采样器 {sampler} 的 "
+            "positive —— 布局不会生效")
+    if not meta.get("prompt_node") and not layout_node:
+        notes.append("没有找到可写入 prompt 的节点（既无文本编码器也无 LayoutBoard）")
+    for item in _post_process_nodes(workflow):
+        if item["affects_canvas"]:
+            notes.append(
+                f"节点 {item['id']}（{item['class']}）会改变最终尺寸，交付的像素可能不等于 size")
+    return notes
+
+
 def _describe(model_id: str, entry: dict, object_info: dict | None = None) -> dict:
     """Describe one workflow as a model, with its parameters derived from the graph.
 
@@ -644,6 +736,8 @@ def _describe(model_id: str, entry: dict, object_info: dict | None = None) -> di
         "routing": {key: merged.get(key) for key in (
             "prompt_node", "prompt_field", "size_nodes", "seed_nodes",
             "sampler_node", "layout_node", "negative_node") if merged.get(key)},
+        "post_process_nodes": _post_process_nodes(workflow),
+        "warnings": _warnings(workflow, merged),
         "default_size": merged.get("default_size") or "",
         "default_quality": merged.get("default_quality") or "",
         "supported_ratios": merged.get("supported_ratios") or "",
@@ -887,6 +981,7 @@ def register_routes() -> bool:
                                if key not in (overrides or {})),
             "default_size": meta.get("default_size") or "",
             "aliases": _derive_aliases(workflow, meta),
+            "warnings": _warnings(workflow, meta),
             "params_schema": meta.get("params_schema") or {},
             "node_inputs": _node_inputs(workflow, object_info),
         })

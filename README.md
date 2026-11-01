@@ -106,11 +106,13 @@ curl -X POST http://127.0.0.1:8188/v1/_import \
 
 ### `GET /v1/models`
 
-每个工作流返回 `id` / `display_name` / `default_size` / `params_schema`，另带三个诊断字段：
+每个工作流返回 `id` / `display_name` / `default_size` / `params_schema`，另带五个诊断字段：
 
 - `routing` —— 这次真正写到了哪些节点（如 `prompt_node=5 size_nodes=6 seed_nodes=8`），用来证明推导没走错
 - `inferred` —— 哪些键是扫描得出的、而不是 meta 写的
 - `node_inputs` —— 全图每个节点的可写字段名，点号键的完整地图
+- `post_process_nodes` —— 采样之后会改变画面的节点（放大 / 局部重绘）；`affects_canvas: true` 表示交付像素可能不等于 `size`
+- `warnings` —— 调用方需要知道但不会让请求失败的事：布局没接进采样器、没有可写 prompt 的节点、放大节点会改尺寸
 
 ### `POST /v1/images/generations`
 
